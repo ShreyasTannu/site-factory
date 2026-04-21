@@ -22,6 +22,7 @@ ormsgpack==1.12.2
 packaging==26.1
 pydantic==2.13.0
 pydantic_core==2.46.0
+PyGithub==2.4.0
 PyYAML==6.0.3
 requests==2.33.1
 requests-toolbelt==1.0.0

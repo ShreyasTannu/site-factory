@@ -3,7 +3,7 @@ import shutil
 
 import streamlit as st
 
-from orchestrator import AgentState, factory
+from orchestrator import AgentState, OrchestratorExecutionError, factory
 
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -163,6 +163,19 @@ if generate_clicked:
             }
 
             final_state = factory.invoke(state)
+        except OrchestratorExecutionError as exc:
+            st.error(f"Website generation failed: {exc}")
+
+            debug_logs = exc.state.get("debug_logs", "")
+            error_traceback = exc.state.get("error_traceback", "")
+
+            if debug_logs:
+                with st.expander("Debug Logs"):
+                    st.code(debug_logs, language="text")
+
+            if error_traceback:
+                with st.expander("Error Traceback"):
+                    st.code(error_traceback, language="text")
         except Exception as exc:
             st.error(f"Website generation failed: {exc}")
         else:

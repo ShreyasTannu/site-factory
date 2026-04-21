@@ -11,6 +11,14 @@ REFERENCE_FILENAME = "reference.jpg"
 JOB_TYPES = ("NEW", "REDESIGN")
 
 
+def extract_live_preview_url(debug_logs: str) -> str | None:
+    marker = "SUCCESS! Live Preview URL:"
+    for line in debug_logs.splitlines():
+        if marker in line:
+            return line.split(marker, 1)[1].strip()
+    return None
+
+
 def normalize_project_name(value: str) -> str:
     normalized = value.strip().lower().replace(" ", "-").replace("_", "-")
     cleaned = []
@@ -163,6 +171,11 @@ if generate_clicked:
 
             build_errors = final_state.get("build_errors", "")
             build_logs = final_state.get("build_logs", "")
+            debug_logs = final_state.get("debug_logs", "")
+            live_preview_url = extract_live_preview_url(debug_logs)
+
+            if live_preview_url:
+                st.link_button("Open Live Preview", live_preview_url, use_container_width=True)
 
             if build_errors:
                 with st.expander("Build Errors"):
@@ -171,3 +184,7 @@ if generate_clicked:
             if build_logs:
                 with st.expander("Build Logs"):
                     st.code(build_logs, language="text")
+
+            if debug_logs:
+                with st.expander("Debug Logs"):
+                    st.code(debug_logs, language="text")

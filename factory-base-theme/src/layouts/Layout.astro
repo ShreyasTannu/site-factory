@@ -1,0 +1,106 @@
+---
+import { ViewTransitions } from 'astro:transitions';
+import pages from "../data/pages.json";
+import siteMeta from "../data/site_meta.json";
+import "../styles/global.css";
+
+interface Props { title: string; }
+const { title } = Astro.props;
+const currentPath = Astro.url.pathname;
+
+const brandName = siteMeta.brand_name || "Brand";
+
+// Determine Primary CTA dynamically
+const hasContact = pages.some(p => p.slug === 'contact');
+const defaultHref = hasContact ? '/contact' : '/';
+const primaryCtaHref = siteMeta.primary_cta_href || defaultHref;
+const primaryCtaLabel = siteMeta.primary_cta_label || "Contact Us";
+const currentYear = new Date().getFullYear();
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title} | {brandName}</title>
+    <ViewTransitions />
+  </head>
+  <body class="min-h-screen bg-base-100 text-base-content antialiased">
+    <div class="flex min-h-screen flex-col bg-base-100">
+      
+<nav class="sticky top-0 z-50 border-b border-base-200 bg-base-100/95 backdrop-blur supports-[backdrop-filter]:bg-base-100/80">
+        <div class="navbar mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <div class="navbar-start gap-3">
+            <div class="dropdown lg:hidden">
+              <label tabindex="0" class="btn btn-ghost btn-circle border border-base-200 bg-base-100 shadow-sm">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              </label>
+              <ul tabindex="0" class="menu menu-sm dropdown-content mt-3 w-64 rounded-box border border-base-200 bg-base-100 p-3 shadow-2xl">
+                {pages.map((page) => {
+                  const href = page.slug === 'index' ? '/' : `/${page.slug}`;
+                  const isActive = currentPath === href || currentPath === `${href}/`;
+                  return (
+                    <li>
+                      <a href={href} class={`rounded-xl px-4 py-3 text-sm font-medium transition-colors ${isActive ? 'bg-primary text-primary-content' : 'hover:bg-base-200 hover:text-primary'}`}>
+                        {page.title}
+                      </a>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+            <a href="/" class="text-xl font-black tracking-tight text-primary sm:text-2xl">{brandName}</a>
+          </div>
+          <div class="navbar-center hidden lg:flex">
+            <ul class="menu menu-horizontal gap-2">
+              {pages.map((page) => {
+                const href = page.slug === 'index' ? '/' : `/${page.slug}`;
+                const isActive = currentPath === href || currentPath === `${href}/`;
+                return (
+                  <li>
+                    <a href={href} class={`rounded-full px-4 py-2 font-semibold ${isActive ? 'bg-primary text-primary-content' : 'text-slate-700 hover:bg-base-200'}`}>
+                      {page.title}
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+          <div class="navbar-end">
+            <a href={primaryCtaHref} class="btn btn-primary rounded-full px-6">{primaryCtaLabel}</a>
+          </div>
+        </div>
+      </nav>
+
+      <main class="flex-1">
+        <slot />
+      </main>
+
+      <footer class="border-t border-base-200 bg-slate-950 text-slate-200 pt-10 pb-6">
+        <div class="mx-auto flex max-w-7xl flex-col md:flex-row justify-between px-4 sm:px-6 lg:px-8">
+          <div>
+             <p class="text-2xl font-black">{brandName}</p>
+             <p class="text-slate-400 mt-2">Premium generated digital presence.</p>
+          </div>
+          <div class="mt-6 md:mt-0">
+            <ul class="flex gap-4">
+              {pages.map((page) => {
+                const href = page.slug === 'index' ? '/' : `/${page.slug}`;
+                return <li><a href={href} class="hover:text-white transition-colors">{page.title}</a></li>;
+              })}
+            </ul>
+          </div>
+        </div>
+        
+        <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 mt-10 border-t border-slate-800 pt-6">
+          <p class="text-sm text-slate-500 text-center md:text-left">
+            &copy; {currentYear} {brandName}. All rights reserved.
+          </p>
+        </div>
+      </footer>
+      
+    </div>
+  </body>
+</html>

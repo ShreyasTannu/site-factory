@@ -1,0 +1,10 @@
+__pycache__/
+venv/
+.env
+web-project/
+reference.jpg
+.gitignore
+.gitignore
+.codex
+hero.jpg
+debug.py

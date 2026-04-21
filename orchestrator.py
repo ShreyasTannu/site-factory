@@ -868,6 +868,7 @@ def deployer_node(state: AgentState):
         
         # Force push guarantees the remote matches the new generated output exactly
         push_output = run_shell("git push -u origin main --force", cwd=PROJECT_DIR)
+        import time
         import urllib.request
 
         if NETLIFY_AUTH_TOKEN:
@@ -894,10 +895,61 @@ def deployer_node(state: AgentState):
             try:
                 with urllib.request.urlopen(netlify_req) as response:
                     site_data = json.loads(response.read().decode())
-                    live_url = site_data.get("ssl_url", site_data.get("url"))
-                    append_debug_log(state, f"SUCCESS! Live Preview URL: {live_url}")
+                    site_id = site_data.get("id")
+                    site_admin_url = site_data.get("admin_url")
+                    if site_admin_url:
+                        append_debug_log(state, f"Netlify site created: {site_admin_url}")
+
+                    if not site_id:
+                        raise Exception("Netlify created a site but did not return a site ID.")
+
+                    append_debug_log(state, "Waiting for Netlify to finish the initial deploy...")
+                    deploys_api_url = f"https://api.netlify.com/api/v1/sites/{site_id}/deploys"
+                    live_url = None
+
+                    for attempt in range(1, 13):
+                        deploys_req = urllib.request.Request(deploys_api_url, headers=netlify_headers)
+                        with urllib.request.urlopen(deploys_req) as deploys_response:
+                            deploys_data = json.loads(deploys_response.read().decode())
+
+                        latest_deploy = deploys_data[0] if deploys_data else None
+                        if not latest_deploy:
+                            append_debug_log(state, f"Netlify deploy not available yet (attempt {attempt}/12).")
+                            time.sleep(5)
+                            continue
+
+                        deploy_state = str(latest_deploy.get("state", "")).lower()
+                        deploy_error = (latest_deploy.get("error_message") or "").strip()
+
+                        if deploy_error or deploy_state in {"error", "failed"}:
+                            raise Exception(
+                                f"Netlify initial deploy failed: {deploy_error or f'state={deploy_state}'}"
+                            )
+
+                        if deploy_state in {"ready", "current"}:
+                            live_url = (
+                                latest_deploy.get("deploy_ssl_url")
+                                or latest_deploy.get("ssl_url")
+                                or latest_deploy.get("deploy_url")
+                                or site_data.get("ssl_url")
+                                or site_data.get("url")
+                            )
+                            append_debug_log(state, f"SUCCESS! Live Preview URL: {live_url}")
+                            break
+
+                        append_debug_log(
+                            state,
+                            f"Netlify deploy status: {deploy_state or 'unknown'} (attempt {attempt}/12).",
+                        )
+                        time.sleep(5)
+
+                    if not live_url:
+                        append_debug_log(
+                            state,
+                            "WARNING: Netlify site was created, but the initial deploy did not finish in time.",
+                        )
             except Exception as e:
-                append_debug_log(state, f"WARNING: GitHub push succeeded, but Netlify auto-link failed: {e}")
+                raise Exception(f"GitHub push succeeded, but Netlify deploy failed: {e}")
         else:
             append_debug_log(state, "No NETLIFY_AUTH_TOKEN found. Skipping auto-deploy.")
 
@@ -936,7 +988,7 @@ workflow.add_conditional_edges(
 workflow.add_edge("deployer", END)
 
 factory = workflow.compile()
-print("Factory pipeline initialized v11")
+print("Factory pipeline initialized v12")
 
 
 # if __name__ == "__main__":

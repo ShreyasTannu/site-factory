@@ -868,27 +868,31 @@ def deployer_node(state: AgentState):
         
         # Force push guarantees the remote matches the new generated output exactly
         push_output = run_shell("git push -u origin main --force", cwd=PROJECT_DIR)
+        push_hint = git_push_permission_hint(push_output)
+        
+        append_debug_log(state, f"Push output:\n{push_output}")
+        if push_hint:
+            append_debug_log(state, push_hint)
+            raise Exception(push_hint)
+
+        import tempfile
         import time
         import urllib.request
+        import zipfile
 
         if NETLIFY_AUTH_TOKEN:
-            append_debug_log(state, "Linking repository to Netlify for live deployment...")
+            dist_dir = os.path.join(PROJECT_DIR, "dist")
+            if not os.path.isdir(dist_dir):
+                raise Exception(f"Netlify deploy failed: built output directory not found at {dist_dir}")
+
+            append_debug_log(state, "Uploading built site to Netlify...")
             netlify_api_url = "https://api.netlify.com/api/v1/sites"
             netlify_headers = {
                 "Authorization": f"Bearer {NETLIFY_AUTH_TOKEN}",
                 "Content-Type": "application/json"
             }
-            # Tell Netlify to create a site and hook it to the GitHub repo
             netlify_payload = json.dumps({
-                "name": f"{repo_name}-{os.urandom(4).hex()}", # Ensure unique subdomain
-                "repo": {
-                    "provider": "github",
-                    "repo": f"{owner_name}/{repo_name}",
-                    "private": False,
-                    "branch": "main",
-                    "cmd": "npm run build",
-                    "dir": "dist"
-                }
+                "name": f"{repo_name}-{os.urandom(4).hex()}"
             }).encode("utf-8")
             
             netlify_req = urllib.request.Request(netlify_api_url, data=netlify_payload, headers=netlify_headers)
@@ -903,27 +907,57 @@ def deployer_node(state: AgentState):
                     if not site_id:
                         raise Exception("Netlify created a site but did not return a site ID.")
 
-                    append_debug_log(state, "Waiting for Netlify to finish the initial deploy...")
-                    deploys_api_url = f"https://api.netlify.com/api/v1/sites/{site_id}/deploys"
+                    dist_file_count = 0
+                    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as temp_zip_file:
+                        zip_path = temp_zip_file.name
+
+                    try:
+                        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+                            for root, _, files in os.walk(dist_dir):
+                                for filename in files:
+                                    file_path = os.path.join(root, filename)
+                                    arcname = os.path.relpath(file_path, dist_dir)
+                                    zip_file.write(file_path, arcname)
+                                    dist_file_count += 1
+
+                        if dist_file_count == 0:
+                            raise Exception(f"Netlify deploy failed: no built files found in {dist_dir}")
+
+                        with open(zip_path, "rb") as zip_stream:
+                            deploy_payload = zip_stream.read()
+
+                        deploy_headers = {
+                            "Authorization": f"Bearer {NETLIFY_AUTH_TOKEN}",
+                            "Content-Type": "application/zip"
+                        }
+                        deploy_api_url = f"https://api.netlify.com/api/v1/sites/{site_id}/deploys"
+                        deploy_req = urllib.request.Request(deploy_api_url, data=deploy_payload, headers=deploy_headers)
+
+                        with urllib.request.urlopen(deploy_req) as deploy_response:
+                            deploy_data = json.loads(deploy_response.read().decode())
+                    finally:
+                        if os.path.exists(zip_path):
+                            os.remove(zip_path)
+
+                    deploy_id = deploy_data.get("id")
+                    if not deploy_id:
+                        raise Exception("Netlify did not return a deploy ID after uploading the built site.")
+
+                    append_debug_log(state, "Waiting for Netlify deploy to finish...")
                     live_url = None
+                    deploy_status_url = f"https://api.netlify.com/api/v1/deploys/{deploy_id}"
 
                     for attempt in range(1, 13):
-                        deploys_req = urllib.request.Request(deploys_api_url, headers=netlify_headers)
-                        with urllib.request.urlopen(deploys_req) as deploys_response:
-                            deploys_data = json.loads(deploys_response.read().decode())
-
-                        latest_deploy = deploys_data[0] if deploys_data else None
-                        if not latest_deploy:
-                            append_debug_log(state, f"Netlify deploy not available yet (attempt {attempt}/12).")
-                            time.sleep(5)
-                            continue
+                        status_req = urllib.request.Request(deploy_status_url, headers={"Authorization": f"Bearer {NETLIFY_AUTH_TOKEN}"})
+                        with urllib.request.urlopen(status_req) as status_response:
+                            latest_deploy = json.loads(status_response.read().decode())
 
                         deploy_state = str(latest_deploy.get("state", "")).lower()
                         deploy_error = (latest_deploy.get("error_message") or "").strip()
 
                         if deploy_error or deploy_state in {"error", "failed"}:
                             raise Exception(
-                                f"Netlify initial deploy failed: {deploy_error or f'state={deploy_state}'}"
+                                f"Netlify deploy failed: {deploy_error or f'state={deploy_state}'}"
                             )
 
                         if deploy_state in {"ready", "current"}:
@@ -944,21 +978,11 @@ def deployer_node(state: AgentState):
                         time.sleep(5)
 
                     if not live_url:
-                        append_debug_log(
-                            state,
-                            "WARNING: Netlify site was created, but the initial deploy did not finish in time.",
-                        )
+                        raise Exception("Netlify deploy did not become ready before the polling timeout.")
             except Exception as e:
                 raise Exception(f"GitHub push succeeded, but Netlify deploy failed: {e}")
         else:
             append_debug_log(state, "No NETLIFY_AUTH_TOKEN found. Skipping auto-deploy.")
-
-        push_hint = git_push_permission_hint(push_output)
-        
-        append_debug_log(state, f"Push output:\n{push_output}")
-        if push_hint:
-            append_debug_log(state, push_hint)
-            raise Exception(push_hint)
         append_debug_log(state, f"Deployed to: https://github.com/{owner_name}/{repo_name}")
         return state
 

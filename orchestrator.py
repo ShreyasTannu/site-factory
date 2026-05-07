@@ -688,6 +688,17 @@ def editor_node(state: AgentState):
         if not edit_prompt:
             raise Exception("Edit mode triggered but no edit_prompt provided.")
 
+        public_dir = os.path.join(PROJECT_DIR, "public")
+        os.makedirs(public_dir, exist_ok=True)
+        for asset_name in state.get("assets", []):
+            source_path = os.path.join(ROOT_DIR, asset_name)
+            dest_path = os.path.join(public_dir, asset_name)
+            if os.path.exists(source_path):
+                shutil.copy2(source_path, dest_path)
+                append_debug_log(state, f"Copied edit asset to public: {asset_name}")
+            else:
+                append_debug_log(state, f"WARNING: Edit asset {asset_name} listed but not found on disk.")
+
         context_files = []
         pages_dir = os.path.join(PROJECT_DIR, "src", "pages")
         styles_dir = os.path.join(PROJECT_DIR, "src", "styles")
@@ -715,26 +726,30 @@ def editor_node(state: AgentState):
             )
 
         system_msg = (
-            "You are an expert AI developer maintaining an Astro/Tailwind codebase. "
-            "Review the user's requested change and the current codebase context. "
-            "Output ONLY the fully updated code for the file(s) that need to be changed. "
-            "You MUST wrap each modified file's code in XML tags containing the exact path, like this:\n"
-            "<file path=\"src/pages/contact.astro\">\n...complete updated code...\n</file>\n"
-            "Do NOT output markdown code blocks. Do not omit code for brevity. Provide the entire updated file."
+            "You are a Surgical Code Editor.\n"
+            "STRICT RULES:\n"
+            "- IMMUTABILITY: Do not change ANY code, styles, or logic unrelated to the user request.\n"
+            "- NO REFACTORING: Maintain original indentation, naming, and structure exactly.\n"
+            "- NO TRUNCATION: Output the ENTIRE updated file within <file path='...'> tags.\n"
+            "- If a PREVIOUS BUILD FAILED, fix the error as the highest priority."
         )
 
         user_msg = (
-            f"CURRENT CODEBASE:\n{codebase_context}\n\n"
-            f"USER REQUESTED MODIFICATION:\n{edit_prompt}"
+            "### TASK\n"
+            f"USER REQUEST: {edit_prompt}\n"
+            "### CONTEXT\n"
+            f"{codebase_context}"
             f"{error_context}"
         )
+        user_content: list[ChatCompletionContentPartParam] = build_image_content_parts(state)
+        user_content.append(ChatCompletionContentPartTextParam(type="text", text=user_msg))
+        system_message: ChatCompletionSystemMessageParam = {"role": "system", "content": system_msg}
+        user_message: ChatCompletionUserMessageParam = {"role": "user", "content": user_content}
+        messages: list[ChatCompletionMessageParam] = [system_message, user_message]
 
         response = client.chat.completions.create(
             model=CODER_MODEL,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ],
+            messages=messages,
             # max_tokens=8192,
             max_tokens=64000,
             temperature=0.1,
@@ -754,7 +769,7 @@ def editor_node(state: AgentState):
 
         content = extract_text_content(response, "Editor")
 
-        pattern = r'<file path="([^"]+)">\s*(.*?)\s*</file>'
+        pattern = r'<file path=["\']([^"\']+)["\']>\s*(.*?)\s*</file>'
         matches = re.findall(pattern, content, re.DOTALL)
 
         if not matches:
@@ -765,6 +780,9 @@ def editor_node(state: AgentState):
             project_root = os.path.abspath(PROJECT_DIR)
             if not full_path.startswith(project_root + os.sep):
                 append_debug_log(state, f"WARNING: Editor tried to modify {path} outside the project. Skipping.")
+                continue
+            if len(new_code.strip()) < 10:
+                append_debug_log(state, f"WARNING: Editor returned suspiciously short code for {path}. Skipping.")
                 continue
             if os.path.exists(full_path):
                 with open(full_path, "w") as handle:

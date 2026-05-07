@@ -263,6 +263,16 @@ else:
             height=220,
             key="edit_prompt",
         )
+        edit_reference_image = st.file_uploader(
+            "New Reference Image",
+            type=["png", "jpg", "jpeg"],
+            key="edit_reference_image",
+        )
+        edit_asset_files = st.file_uploader(
+            "New Assets",
+            accept_multiple_files=True,
+            key="edit_assets",
+        )
 
     edit_validation_errors = []
     if not normalized_edit_project_name:
@@ -286,10 +296,23 @@ else:
     if edit_clicked:
         with st.spinner("Editing existing site..."):
             try:
+                edit_assets_list: list[str] = []
+                if edit_reference_image is not None:
+                    edit_reference_filename = "edit_reference.jpg"
+                    edit_reference_path = os.path.join(ROOT_DIR, edit_reference_filename)
+                    save_uploaded_file(edit_reference_image, edit_reference_path)
+                    edit_assets_list.append(edit_reference_filename)
+
+                for asset_file in edit_asset_files or []:
+                    asset_path = os.path.join(ROOT_DIR, asset_file.name)
+                    save_uploaded_file(asset_file, asset_path)
+                    edit_assets_list.append(asset_file.name)
+
                 state = base_state(normalized_edit_project_name, "")
                 state.update(
                     {
                         "job_type": "EDIT",
+                        "assets": edit_assets_list,
                         "edit_mode": True,
                         "edit_prompt": edit_prompt.strip(),
                     }

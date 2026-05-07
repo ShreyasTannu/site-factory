@@ -339,6 +339,8 @@ class AgentState(TypedDict):
     job_type: str
     requirements: str
     assets: List[str]
+    edit_mode: bool
+    edit_prompt: str
     theme: dict
     site_meta: dict
     site_manifest: str
@@ -353,15 +355,86 @@ class AgentState(TypedDict):
     next: NotRequired[str]
 
 
+# def append_debug_log(state: AgentState, message: str) -> None:
+#     print(message)
+#     existing = state.get("debug_logs", "")
+#     state["debug_logs"] = f"{existing}\n{message}".strip() if existing else message
 def append_debug_log(state: AgentState, message: str) -> None:
     print(message)
     existing = state.get("debug_logs", "")
     state["debug_logs"] = f"{existing}\n{message}".strip() if existing else message
-
+    
+    try:
+        project_id = state.get("project_id", "unknown_project")
+        safe_project_id = re.sub(r'[^a-zA-Z0-9_-]', '-', project_id).strip('-').lower()
+        
+        logs_dir = os.path.join(ROOT_DIR, "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        log_file_path = os.path.join(logs_dir, f"{safe_project_id}.log")
+        
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        with open(log_file_path, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {message}\n")
+    except Exception as e:
+        print(f"FAILED TO WRITE LOG TO DISK: {e}")
 
 def set_stage(state: AgentState, stage: str, message: str) -> None:
     state["current_stage"] = stage
     append_debug_log(state, message)
+
+
+def scrub_secret(text: str, secret: str | None) -> str:
+    if not text or not secret:
+        return text
+    return text.replace(secret, "[REDACTED]")
+
+
+def clone_existing_project_from_github(state: AgentState) -> None:
+    github_token = os.getenv("GITHUB_TOKEN")
+    github_org = os.getenv("GITHUB_ORG_NAME")
+    raw_repo_name = state.get("project_id", "generated-site")
+    repo_name = re.sub(r"[^a-zA-Z0-9_-]", "-", raw_repo_name).strip("-").lower()
+
+    if not repo_name:
+        raise Exception("Edit mode requires a valid project_id to restore the GitHub repo.")
+    if not github_token:
+        raise Exception("Edit mode requires GITHUB_TOKEN to restore a missing local project from GitHub.")
+
+    from github import Github, GithubException
+    from github.AuthenticatedUser import AuthenticatedUser
+
+    g = Github(github_token)
+    try:
+        if github_org:
+            owner_name = github_org
+            org = g.get_organization(github_org)
+            org.get_repo(repo_name)
+        else:
+            user = cast(AuthenticatedUser, g.get_user())
+            owner_name = user.login
+            user.get_repo(repo_name)
+    except GithubException as exc:
+        owner_label = github_org or "authenticated user"
+        raise Exception(f"Could not access GitHub repo '{repo_name}' under {owner_label}: {exc.data}") from exc
+
+    remote_url = f"https://x-access-token:{github_token}@github.com/{owner_name}/{repo_name}.git"
+    safe_remote_url = remote_url.replace(github_token, "[REDACTED]")
+    append_debug_log(state, f"Verified GitHub repo exists: {owner_name}/{repo_name}")
+    append_debug_log(state, f"Cloning {safe_remote_url} -> {PROJECT_DIR}")
+
+    result = subprocess.run(
+        ["git", "clone", remote_url, PROJECT_DIR],
+        capture_output=True,
+        text=True,
+        cwd=ROOT_DIR,
+    )
+    clone_output = scrub_secret((result.stdout or "") + (result.stderr or ""), github_token)
+    if clone_output.strip():
+        append_debug_log(state, f"Clone output:\n{clone_output}")
+    if result.returncode != 0:
+        raise Exception(f"Failed to clone GitHub repo {owner_name}/{repo_name}.")
 
 
 def json_safe_dump(value: Any) -> Any:
@@ -461,6 +534,15 @@ def build_image_content_parts(state: AgentState) -> list[ChatCompletionContentPa
 def bootstrapper_node(state: AgentState):
     set_stage(state, "bootstrapper", "\n--- AGENT: BOOTSTRAPPER IS SETTING UP ---")
     try:
+        if state.get("edit_mode"):
+            append_debug_log(state, f"EDIT MODE ENABLED. Bypassing bootstrap, loading existing project: {PROJECT_DIR}")
+            if not os.path.exists(PROJECT_DIR):
+                append_debug_log(state, f"Local project missing. Cloning {state['project_id']} from GitHub...")
+                clone_existing_project_from_github(state)
+                append_debug_log(state, "Installing dependencies for restored project...")
+                append_debug_log(state, run_shell("npm i"))
+            return state
+
         if os.path.exists(PROJECT_DIR):
             shutil.rmtree(PROJECT_DIR)
             append_debug_log(state, f"Deleted existing {PROJECT_DIR}")
@@ -509,7 +591,7 @@ def architect_node(state: AgentState):
         response = client.chat.completions.create(
             model=ARCHITECT_MODEL,
             messages=messages,
-            max_tokens=4096,
+            max_tokens=8192,
             temperature=0.2,
         )
         state["provider_response_debug"] = capture_provider_response_debug(response)
@@ -598,6 +680,117 @@ def architect_node(state: AgentState):
         raise_with_state(state, exc)
 
 
+def editor_node(state: AgentState):
+    set_stage(state, "editor", "\n--- AGENT: EDITOR IS MODIFYING FILES ---")
+    response = None
+    try:
+        edit_prompt = state.get("edit_prompt", "")
+        if not edit_prompt:
+            raise Exception("Edit mode triggered but no edit_prompt provided.")
+
+        context_files = []
+        pages_dir = os.path.join(PROJECT_DIR, "src", "pages")
+        styles_dir = os.path.join(PROJECT_DIR, "src", "styles")
+
+        if os.path.exists(pages_dir):
+            for filename in os.listdir(pages_dir):
+                if filename.endswith(".astro"):
+                    filepath = os.path.join(pages_dir, filename)
+                    with open(filepath, "r") as handle:
+                        context_files.append(f"<file path=\"src/pages/{filename}\">\n{handle.read()}\n</file>")
+
+        css_path = os.path.join(styles_dir, "global.css")
+        if os.path.exists(css_path):
+            with open(css_path, "r") as handle:
+                context_files.append(f"<file path=\"src/styles/global.css\">\n{handle.read()}\n</file>")
+
+        codebase_context = "\n".join(context_files)
+        previous_errors = state.get("build_errors", "")
+        error_context = ""
+        if previous_errors:
+            error_context = (
+                "\n\nPREVIOUS BUILD FAILED:\n"
+                f"{previous_errors}\n"
+                "Fix these build errors while preserving the user's requested modification."
+            )
+
+        system_msg = (
+            "You are an expert AI developer maintaining an Astro/Tailwind codebase. "
+            "Review the user's requested change and the current codebase context. "
+            "Output ONLY the fully updated code for the file(s) that need to be changed. "
+            "You MUST wrap each modified file's code in XML tags containing the exact path, like this:\n"
+            "<file path=\"src/pages/contact.astro\">\n...complete updated code...\n</file>\n"
+            "Do NOT output markdown code blocks. Do not omit code for brevity. Provide the entire updated file."
+        )
+
+        user_msg = (
+            f"CURRENT CODEBASE:\n{codebase_context}\n\n"
+            f"USER REQUESTED MODIFICATION:\n{edit_prompt}"
+            f"{error_context}"
+        )
+
+        response = client.chat.completions.create(
+            model=CODER_MODEL,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            # max_tokens=8192,
+            max_tokens=64000,
+            temperature=0.1,
+        )
+        state["provider_response_debug"] = capture_provider_response_debug(response)
+
+        if response.usage:
+            append_debug_log(
+                state,
+                (
+                    "Editor Tokens -> "
+                    f"prompt: {response.usage.prompt_tokens}, "
+                    f"completion: {response.usage.completion_tokens}, "
+                    f"total: {response.usage.total_tokens}"
+                ),
+            )
+
+        content = extract_text_content(response, "Editor")
+
+        pattern = r'<file path="([^"]+)">\s*(.*?)\s*</file>'
+        matches = re.findall(pattern, content, re.DOTALL)
+
+        if not matches:
+            append_debug_log(state, "WARNING: Editor did not output any valid <file> blocks. No changes made.")
+
+        for path, new_code in matches:
+            full_path = os.path.abspath(os.path.join(PROJECT_DIR, path))
+            project_root = os.path.abspath(PROJECT_DIR)
+            if not full_path.startswith(project_root + os.sep):
+                append_debug_log(state, f"WARNING: Editor tried to modify {path} outside the project. Skipping.")
+                continue
+            if os.path.exists(full_path):
+                with open(full_path, "w") as handle:
+                    handle.write(new_code.strip())
+                append_debug_log(state, f"SUCCESS: Edited {path}")
+            else:
+                append_debug_log(state, f"WARNING: Editor tried to modify {path} which does not exist locally.")
+
+        append_debug_log(state, "Running Build Test after edits...")
+        build_output = run_shell("npm run build")
+        append_debug_log(state, f"Build output:\n{build_output}")
+
+        return {
+            "build_logs": build_output,
+            "iteration_count": state.get("iteration_count", 0) + 1,
+            "current_stage": state.get("current_stage", ""),
+            "debug_logs": state.get("debug_logs", ""),
+            "provider_response_debug": state.get("provider_response_debug", ""),
+        }
+
+    except Exception as exc:
+        if response is not None and not state.get("provider_response_debug"):
+            state["provider_response_debug"] = capture_provider_response_debug(response)
+        raise_with_state(state, exc)
+
+
 def coder_node(state: AgentState):
     set_stage(state, "coder", "\n--- AGENT: CODER IS GENERATING STATIC PAGES ---")
     try:
@@ -645,7 +838,8 @@ def coder_node(state: AgentState):
                 response = client.chat.completions.create(
                     model=CODER_MODEL,
                     messages=messages,
-                    max_tokens=8192,
+                    # max_tokens=8192,
+                    max_tokens=64000,
                     temperature=0.1,
                 )
                 state["provider_response_debug"] = capture_provider_response_debug(response)
@@ -728,9 +922,10 @@ def reviewer_node(state: AgentState):
                 }
 
             build_errors = "\n".join(validation_or_generation_lines)
-            append_debug_log(state, f"Feeding back to coder: {build_errors}")
+            retry_target = "editor" if state.get("edit_mode") else "coder"
+            append_debug_log(state, f"Feeding back to {retry_target}: {build_errors}")
             return {
-                "next": "coder",
+                "next": retry_target,
                 "build_errors": build_errors,
                 "current_stage": state.get("current_stage", ""),
                 "debug_logs": state.get("debug_logs", ""),
@@ -765,9 +960,10 @@ def reviewer_node(state: AgentState):
             if "ERROR" in line or "Could not resolve" in line or "error" in line.lower()
         ]
         build_errors = "\n".join(error_lines) if error_lines else "Unknown build error"
-        append_debug_log(state, f"Feeding back to coder: {build_errors}")
+        retry_target = "editor" if state.get("edit_mode") else "coder"
+        append_debug_log(state, f"Feeding back to {retry_target}: {build_errors}")
         return {
-            "next": "coder",
+            "next": retry_target,
             "build_errors": build_errors,
             "current_stage": state.get("current_stage", ""),
             "debug_logs": state.get("debug_logs", ""),
@@ -993,18 +1189,28 @@ workflow = StateGraph(AgentState)
 workflow.add_node("bootstrapper", bootstrapper_node)
 workflow.add_node("architect", architect_node)
 workflow.add_node("coder", coder_node)
+workflow.add_node("editor", editor_node)
 workflow.add_node("reviewer", reviewer_node)
 workflow.add_node("deployer", deployer_node)
 
 workflow.set_entry_point("bootstrapper")
-workflow.add_edge("bootstrapper", "architect")
+workflow.add_conditional_edges(
+    "bootstrapper",
+    lambda state: "editor" if state.get("edit_mode") else "architect",
+    {
+        "editor": "editor",
+        "architect": "architect",
+    },
+)
 workflow.add_edge("architect", "coder")
 workflow.add_edge("coder", "reviewer")
+workflow.add_edge("editor", "reviewer")
 workflow.add_conditional_edges(
     "reviewer",
     lambda state: state["next"],
     {
         "coder": "coder",
+        "editor": "editor",
         "deployer": "deployer",
         END: END,
     },

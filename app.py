@@ -59,13 +59,16 @@ def render_failure(exc: OrchestratorExecutionError) -> None:
 
 
 def render_success(final_state: AgentState, message: str) -> None:
-    st.success(message)
+    build_errors = final_state.get("build_errors", "")
+    if build_errors:
+        st.error("Website could not be created. Review the details below.")
+    else:
+        st.success(message)
 
     site_manifest = final_state.get("site_manifest", "")
     if site_manifest:
         st.code(site_manifest, language="text")
 
-    build_errors = final_state.get("build_errors", "")
     build_logs = final_state.get("build_logs", "")
     debug_logs = final_state.get("debug_logs", "")
     live_preview_url = extract_live_preview_url(debug_logs)
